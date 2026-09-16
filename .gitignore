@@ -1,0 +1,9 @@
+.env
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*.db
+data/*.db-*
+GitHub/killspam-bot-master.zip
