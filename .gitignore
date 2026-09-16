@@ -7,3 +7,5 @@ __pycache__/
 data/*.db
 data/*.db-*
 GitHub/killspam-bot-master.zip
+data/*.log
+work/node_modules/
