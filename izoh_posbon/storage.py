@@ -209,6 +209,23 @@ class Storage:
                         + " "
                         + definition
                     )
+            pending_columns = {
+                row[1]
+                for row in await (
+                    await db.execute("PRAGMA table_info(pending_actions)")
+                ).fetchall()
+            }
+            pending_migrations = {
+                "action": "TEXT NOT NULL DEFAULT 'delete'",
+            }
+            for column, definition in pending_migrations.items():
+                if column not in pending_columns:
+                    await db.execute(
+                        "ALTER TABLE pending_actions ADD COLUMN "
+                        + column
+                        + " "
+                        + definition
+                    )
             retention_cutoff = int(time.time()) - (self.data_retention_days * 86400)
             await db.execute(
                 "DELETE FROM message_fingerprints WHERE created_at < ?",
@@ -800,8 +817,8 @@ class Storage:
                 """
                 INSERT INTO pending_actions(
                     chat_id, chat_title, user_id, message_id, full_name, username,
-                    message_text, score, reasons_json, is_test, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    message_text, score, reasons_json, is_test, action, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -814,6 +831,7 @@ class Storage:
                     decision.score,
                     json.dumps(reasons, ensure_ascii=False),
                     1 if is_test else 0,
+                    decision.action.value,
                     int(time.time()),
                 ),
             )

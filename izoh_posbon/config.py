@@ -24,6 +24,20 @@ def _admin_ids(value: str) -> FrozenSet[int]:
     return frozenset(int(item.strip()) for item in value.split(",") if item.strip())
 
 
+def _ordered_admin_ids(value: str) -> list:
+    if not value:
+        return []
+    seen = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        admin_id = int(item)
+        if admin_id not in seen:
+            seen.append(admin_id)
+    return seen
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -35,6 +49,7 @@ class Settings:
     ban_threshold: int
     mod_log_chat_id: Optional[int]
     admin_ids: FrozenSet[int]
+    primary_admin_id: Optional[int]
     protected_chat_id: Optional[int]
     database_path: Path
     profile_cache_ttl_seconds: int
@@ -81,6 +96,10 @@ class Settings:
             ban_threshold=ban,
             mod_log_chat_id=_optional_int(os.getenv("MOD_LOG_CHAT_ID", "")),
             admin_ids=_admin_ids(os.getenv("ADMIN_IDS", "")),
+            primary_admin_id=(
+                _optional_int(os.getenv("PRIMARY_ADMIN_ID", ""))
+                or (_ordered_admin_ids(os.getenv("ADMIN_IDS", "")) or [None])[0]
+            ),
             protected_chat_id=_optional_int(os.getenv("PROTECTED_CHAT_ID", "")),
             database_path=Path(os.getenv("DATABASE_PATH", "data/izoh_posbon.db")),
             profile_cache_ttl_seconds=int(os.getenv("PROFILE_CACHE_TTL_SECONDS", "3600")),

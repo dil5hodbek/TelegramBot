@@ -78,15 +78,22 @@ def _pending_prompt(action: dict) -> str:
         if action.get("is_test")
         else ""
     )
+    is_review = action.get("action") == ModerationAction.REVIEW.value
+    title = "🔎 <b>Tekshiruv talab qilinadi</b>" if is_review else "⚠️ <b>Shubhali profil aniqlandi</b>"
+    question = (
+        "Ushbu xabarni o'chirib qo'yaymi? (profil bloklanmaydi, risk past)"
+        if is_review
+        else "Ushbu xabarni o'chirib, profilni guruhdan bloklab qo'yaymi?"
+    )
     return (
-        "⚠️ <b>Shubhali profil aniqlandi</b>\n\n"
+        f"{title}\n\n"
         f"Profil: <b>{html.escape(full_name)}</b> "
         f"({html.escape(username)})\n"
         f"Guruh: {html.escape(action.get('chat_title') or str(action.get('chat_id')))}\n"
         f"Risk: <b>{action.get('score', 0)}</b>\n\n"
         f"<b>Xabar matni</b>\n“{html.escape(str(message_text)[:600])}”\n\n"
         f"<b>Sabablar</b>\n{reasons}\n\n"
-        "Ushbu xabarni o'chirib, profilni guruhdan bloklab qo'yaymi?"
+        f"{question}"
         + test_note
     )
 
@@ -396,11 +403,18 @@ def create_router(
         )
         return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    async def send_approval_request(bot: Bot, action_id: int) -> None:
+    async def send_approval_request(
+        bot: Bot, action_id: int, only_primary_admin: bool = False
+    ) -> None:
         action = await storage.get_pending_action(action_id)
         if not action:
             return
-        for admin_id in settings.admin_ids:
+        if only_primary_admin:
+            primary_admin_id = settings.primary_admin_id
+            recipients = [primary_admin_id] if primary_admin_id is not None else []
+        else:
+            recipients = list(settings.admin_ids)
+        for admin_id in recipients:
             try:
                 await bot.send_message(
                     admin_id,
@@ -440,6 +454,8 @@ def create_router(
             await callback.answer("Bu so'rov avval ko'rib chiqilgan.", show_alert=True)
             return
 
+        is_review_only = action.get("action") == ModerationAction.REVIEW.value
+
         if choice == "no":
             result = "❌ Yo'q tanlandi. Hech qanday o'zgarish amalga oshirilmadi."
             await storage.finalize_pending_action(action_id, "rejected", result)
@@ -456,37 +472,41 @@ def create_router(
             except Exception as exc:
                 logger.warning("Tasdiqlangan xabar o'chmadi action=%s: %s", action_id, exc)
                 results.append("xabarni o'chirishda xato")
-            try:
-                await bot.ban_chat_member(
-                    action["chat_id"], action["user_id"], revoke_messages=True
-                )
-                results.append("profil bloklandi")
-                success = True
-            except Exception as exc:
-                logger.warning("Tasdiqlangan profil bloklanmadi action=%s: %s", action_id, exc)
-                results.append("profilni bloklashda xato")
-            else:
+
+            # REVIEW darajasidagi shubha past xavfli hisoblanadi — bunda admin
+            # faqat xabarni o'chirishni tasdiqlaydi, profil bloklanmaydi.
+            if not is_review_only:
                 try:
-                    reason_items = json.loads(action.get("reasons_json") or "[]")
-                except (TypeError, json.JSONDecodeError):
-                    reason_items = []
-                reason = "; ".join(
-                    str(item.get("detail") or item.get("code") or "")
-                    for item in reason_items
-                    if isinstance(item, dict)
-                ) or "Admin tasdiqlagan moderatsiya qarori"
-                try:
-                    await storage.record_blocked_user(
-                        int(action["chat_id"]),
-                        int(action["user_id"]),
-                        str(action.get("full_name") or ""),
-                        str(action.get("username") or ""),
-                        reason,
+                    await bot.ban_chat_member(
+                        action["chat_id"], action["user_id"], revoke_messages=True
                     )
+                    results.append("profil bloklandi")
+                    success = True
                 except Exception as exc:
-                    logger.warning(
-                        "Bloklash auditi yozilmadi action=%s: %s", action_id, exc
-                    )
+                    logger.warning("Tasdiqlangan profil bloklanmadi action=%s: %s", action_id, exc)
+                    results.append("profilni bloklashda xato")
+                else:
+                    try:
+                        reason_items = json.loads(action.get("reasons_json") or "[]")
+                    except (TypeError, json.JSONDecodeError):
+                        reason_items = []
+                    reason = "; ".join(
+                        str(item.get("detail") or item.get("code") or "")
+                        for item in reason_items
+                        if isinstance(item, dict)
+                    ) or "Admin tasdiqlagan moderatsiya qarori"
+                    try:
+                        await storage.record_blocked_user(
+                            int(action["chat_id"]),
+                            int(action["user_id"]),
+                            str(action.get("full_name") or ""),
+                            str(action.get("username") or ""),
+                            reason,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Bloklash auditi yozilmadi action=%s: %s", action_id, exc
+                        )
             result = ("✅ " if success else "⚠️ ") + "; ".join(results) + "."
             await storage.finalize_pending_action(
                 action_id, "approved" if success else "failed", result
@@ -1401,7 +1421,11 @@ def create_router(
             chat_title=message.chat.title or "",
         )
         automatic_enabled = await automatic_mode_enabled(message.chat.id)
-        if not automatic_enabled:
+        # REVIEW darajasidagi shubha (avtomatik rejimda ham) hech qachon "jim"
+        # log bo'lib qolmasligi kerak — u har doim FAQAT asosiy adminga
+        # "Ha/Yo'q" so'rovi sifatida yuboriladi, faqat xabarni o'chirish uchun
+        # (ban qilinmaydi).
+        if not automatic_enabled or decision.action == ModerationAction.REVIEW:
             action_id = await storage.create_pending_action(
                 chat_id=message.chat.id,
                 chat_title=message.chat.title or "",
@@ -1412,7 +1436,8 @@ def create_router(
                 message_text=text,
                 decision=decision,
             )
-            await send_approval_request(bot, action_id)
+            only_primary = decision.action == ModerationAction.REVIEW
+            await send_approval_request(bot, action_id, only_primary_admin=only_primary)
             logger.warning(
                 "ADMIN_APPROVAL_PENDING action=%s chat=%s user=%s score=%s",
                 action_id,
